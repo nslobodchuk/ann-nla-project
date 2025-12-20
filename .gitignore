@@ -205,3 +205,21 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# macOS
+.DS_Store
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter checkpoints (recursive)
+**/.ipynb_checkpoints/
+
+# Project artifacts (generated / large)
+artifacts/data/*.npz
+artifacts/runs/**/*.npz
+artifacts/glove.6B/*.txt
+artifacts/*.zip
+artifacts/*
+
