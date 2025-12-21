@@ -133,6 +133,9 @@ class LorannIndex:
         train_X: Optional[np.ndarray] = None,
         kmeans_max_iter: int = 50,
         kmeans_batch_size: int = 8192,
+        *,
+        n_probe_train: Optional[int] = None,
+        train_multi_assign: bool = True,
     ) -> "LorannIndex":
         """
         Builds IVF clusters and fits per-cluster RRR models.
@@ -156,7 +159,18 @@ class LorannIndex:
         cluster_ids = [np.nonzero(labels == l)[0].astype(np.int32) for l in range(self.n_clusters)]
 
         train_Xn = Xn if train_X is None else l2_normalize(train_X)
-        train_rows = self._assign_training_rows(train_Xn, n_probe_train=self.n_probe)
+
+        # Training assignment can (and often should) probe more clusters than search.
+        # If n_probe_train is None, default to using the same n_probe as search.
+        n_probe_train_eff = int(self.n_probe if n_probe_train is None else n_probe_train)
+        if n_probe_train_eff <= 0:
+            raise ValueError("n_probe_train must be >= 1.")
+
+        train_rows = self._assign_training_rows(
+            train_Xn,
+            n_probe_train=n_probe_train_eff,
+            multi_assign=bool(train_multi_assign),
+        )
 
         models: List[_ClusterModel] = []
         fallback_count = 0
@@ -201,6 +215,9 @@ class LorannIndex:
 
         self.fit_stats_ = {
             "n_clusters": int(self.n_clusters),
+            "n_probe": int(self.n_probe),
+            "n_probe_train": int(n_probe_train_eff),
+            "train_multi_assign": bool(train_multi_assign),
             "fallback_clusters": int(fallback_count),
             "fallback_frac": float(fallback_count) / float(self.n_clusters),
             "avg_cluster_size": float(np.mean(cluster_sizes)) if cluster_sizes else 0.0,
@@ -335,21 +352,43 @@ class LorannIndex:
 
         return cand_ids[top_pos], exact[top_pos].astype(np.float32, copy=False)
 
-    def _assign_training_rows(self, train_Xn: np.ndarray, n_probe_train: int) -> List[List[int]]:
+    def _assign_training_rows(
+        self,
+        train_Xn: np.ndarray,
+        n_probe_train: int,
+        multi_assign: bool = True,
+    ) -> List[List[int]]:
         """
-        Assign each training vector to the best-matching centroid among the top n_probe_train.
-        Returns list of training row indices per cluster.
+        Assign each training vector to IVF clusters.
+
+        - If multi_assign is True (recommended), each training vector is assigned to ALL of its
+          top-n_probe_train clusters. This increases per-cluster training coverage and reduces
+          the number of clusters that fall back to exact scoring due to insufficient training data.
+        - If multi_assign is False, each training vector is assigned only to the single best-matching
+          cluster among the top-n_probe_train (legacy behavior).
+
+        Returns list of training row indices per cluster (indices refer to rows of train_Xn).
         """
         if self.centroids is None:
             raise RuntimeError("Index is not fitted.")
         L = int(self.n_clusters)
         out: List[List[int]] = [[] for _ in range(L)]
+
+        n_probe_train = int(max(1, n_probe_train))
         for i in range(train_Xn.shape[0]):
             q = train_Xn[i]
-            probe = self._route(q, n_probe=int(n_probe_train))
-            # Choose the best of probed clusters
-            best = int(probe[0]) if probe.size else 0
-            out[best].append(int(i))
+            probe = self._route(q, n_probe=n_probe_train)
+
+            if probe.size == 0:
+                out[0].append(int(i))
+                continue
+
+            if multi_assign:
+                for l in probe:
+                    out[int(l)].append(int(i))
+            else:
+                out[int(probe[0])].append(int(i))
+
         return out
 
     def _kmeans_minibatch(
